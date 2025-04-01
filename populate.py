@@ -10,160 +10,101 @@ from functools import partial
 
 fake = Faker()
 
-def generate_cached_values() -> Dict:
-    """Pre-generate common values to avoid repeated random generation"""
-    return {
-        'first_names': [fake.first_name() for _ in range(100)],
-        'last_names': [fake.last_name() for _ in range(100)],
-        'email_domains': [fake.domain_name() for _ in range(20)],
-        'street_types': ['Street', 'Avenue', 'Road', 'Boulevard', 'Lane', 'Drive'],
-        'cities': [fake.city() for _ in range(50)],
-        'descriptions': ['\n'.join([fake.paragraph(nb_sentences=10) for _ in range(3)]) for _ in range(50)],
-        'titles': [fake.catch_phrase() for _ in range(100)],
-        'phone_formats': ["(###) ###-####", "###-###-####", "+1 ### ### ####"],
-        'special_features_options': [
-            ['Trailers', 'Commentaries', 'Deleted Scenes', 'Behind the Scenes'],
-            ['Trailers', 'Commentaries'],
-            ['Deleted Scenes', 'Behind the Scenes'],
-            ['Trailers', 'Behind the Scenes']
-        ]
-    }
-
-def create_base_data(engine) -> dict:
-    """Create or get all base data needed for the database"""
+def get_table_sizes(engine) -> List[tuple]:
+    """Get table sizes ordered by number of records"""
+    query = """
+    SELECT 
+        relname as table_name,
+        n_live_tup as row_count,
+        pg_size_pretty(pg_total_relation_size(relid)) as total_size,
+        pg_size_pretty(pg_relation_size(relid)) as table_size,
+        pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) as index_size
+    FROM pg_stat_user_tables
+    ORDER BY n_live_tup DESC;
+    """
+    
     with engine.connect() as conn:
-        # Default languages
-        languages = [
-            {'name': lang, 'last_update': datetime.now()} 
-            for lang in ['English', 'Italian', 'Japanese', 'Mandarin', 'French', 'German']
-        ]
-        
-        # Check and create languages
-        result = conn.execute(text("SELECT language_id FROM language"))
-        if not result.fetchall():
-            pd.DataFrame(languages).to_sql('language', engine, if_exists='append', index=False)
-        
-        # Get all necessary IDs
-        language_ids = [row[0] for row in conn.execute(text("SELECT language_id FROM language"))]
-        country_ids = [row[0] for row in conn.execute(text("SELECT country_id FROM country"))]
-        city_ids = [row[0] for row in conn.execute(text("SELECT city_id FROM city"))]
-        address_ids = [row[0] for row in conn.execute(text("SELECT address_id FROM address"))]
-        
-        return {
-            'language_ids': language_ids,
-            'country_ids': country_ids,
-            'city_ids': city_ids,
-            'address_ids': address_ids
-        }
+        results = conn.execute(text(query))
+        return results.fetchall()
 
-def create_initial_structure(engine, address_ids: List[int]):
-    """Create initial stores and staff if they don't exist"""
-    with engine.connect() as conn:
-        # Check existing data
-        stores = [row[0] for row in conn.execute(text("SELECT store_id FROM store"))]
-        staff = [row[0] for row in conn.execute(text("SELECT staff_id FROM staff"))]
-        
-        if not stores or not staff:
-            # Create first store and staff member
-            conn.execute(text("""
-                INSERT INTO store (store_id, manager_staff_id, address_id, last_update)
-                VALUES (1, 1, :address_id, NOW())
-            """), {"address_id": address_ids[0]})
-            
-            conn.execute(text("""
-                INSERT INTO staff (first_name, last_name, address_id, email, active, username, password, store_id, last_update)
-                VALUES (:fname, :lname, :addr_id, :email, TRUE, :uname, :pwd, 1, NOW())
-            """), {
-                "fname": fake.first_name(), "lname": fake.last_name(),
-                "addr_id": address_ids[0], "email": fake.email(),
-                "uname": fake.user_name(), "pwd": fake.password()
-            })
-            
-            # Update first store with correct manager
-            staff_id = conn.execute(text("SELECT staff_id FROM staff ORDER BY staff_id DESC LIMIT 1")).scalar()
-            conn.execute(text("UPDATE store SET manager_staff_id = :staff_id WHERE store_id = 1"), 
-                        {"staff_id": staff_id})
-            
-            # Create second store and staff member
-            conn.execute(text("""
-                INSERT INTO store (store_id, manager_staff_id, address_id, last_update)
-                VALUES (2, :staff_id, :address_id, NOW())
-            """), {"staff_id": staff_id, "address_id": address_ids[1]})
-            
-            conn.execute(text("""
-                INSERT INTO staff (first_name, last_name, address_id, email, active, username, password, store_id, last_update)
-                VALUES (:fname, :lname, :addr_id, :email, TRUE, :uname, :pwd, 2, NOW())
-            """), {
-                "fname": fake.first_name(), "lname": fake.last_name(),
-                "addr_id": address_ids[1], "email": fake.email(),
-                "uname": fake.user_name(), "pwd": fake.password()
-            })
-            
-            conn.commit()
-
-def fast_generate_film_chunk(chunk_size: int, language_ids: List[int], cached_values: dict) -> List[dict]:
-    """Generate film data using cached values for better performance"""
-    ratings = ['G', 'PG', 'PG-13', 'R', 'NC-17']
+def generate_inventory_chunk(chunk_size: int, film_ids: List[int], store_ids: List[int]) -> List[dict]:
+    """Generate inventory records"""
     current_time = datetime.now()
     
     return [{
-        'title': f"{random.choice(cached_values['titles'])} {random.choice(['Chronicles', 'Story', 'Tales', 'Adventures', 'Legacy'])}",
-        'description': random.choice(cached_values['descriptions']),
-        'release_year': random.randint(1970, 2023),
-        'language_id': random.choice(language_ids),
-        'original_language_id': random.choice(language_ids) if random.random() > 0.7 else None,
-        'rental_duration': random.randint(3, 14),
-        'rental_rate': round(random.uniform(0.99, 9.99), 2),
-        'length': random.randint(60, 240),
-        'replacement_cost': round(random.uniform(9.99, 49.99), 2),
-        'rating': random.choice(ratings),
-        'last_update': current_time,
-        'special_features': random.choice(cached_values['special_features_options']),
-        'fulltext': None
-    } for _ in range(chunk_size)]
-
-def fast_generate_customer_chunk(chunk_size: int, store_ids: List[int], address_ids: List[int], cached_values: dict) -> List[dict]:
-    """Generate customer data using cached values for better performance"""
-    current_time = datetime.now()
-    
-    return [{
+        'film_id': random.choice(film_ids),
         'store_id': random.choice(store_ids),
-        'first_name': random.choice(cached_values['first_names']),
-        'last_name': random.choice(cached_values['last_names']),
-        'email': f"{random.choice(cached_values['first_names']).lower()}.{random.choice(cached_values['last_names']).lower()}@{random.choice(cached_values['email_domains'])}",
-        'address_id': random.choice(address_ids),
-        'activebool': True,
-        'create_date': current_time.date(),
-        'last_update': current_time,
-        'active': 1
+        'last_update': current_time
     } for _ in range(chunk_size)]
 
-def fast_generate_location_chunk(num_records: int, existing_ids: dict, cached_values: dict) -> tuple:
-    """Generate location data using cached values for better performance"""
+def generate_payment_chunk(chunk_size: int, rental_ids: List[int], 
+                         customer_ids: List[int], staff_ids: List[int]) -> List[dict]:
+    """Generate payment records within the valid partition range (2022 only)"""
+    # Define date range for 2022 only
+    start_date = datetime(2022, 1, 1)
+    end_date = datetime(2022, 7, 31)  # Last available partition is 2022-07
+    
+    return [{
+        'customer_id': random.choice(customer_ids),
+        'staff_id': random.choice(staff_ids),
+        'rental_id': random.choice(rental_ids),
+        'amount': round(random.uniform(0.99, 9.99), 2),
+        'payment_date': fake.date_time_between(start_date=start_date, end_date=end_date)
+    } for _ in range(chunk_size)]
+
+def generate_rental_chunk(chunk_size: int, inventory_ids: List[int], 
+                         customer_ids: List[int], staff_ids: List[int]) -> List[dict]:
+    """Generate rental records with dates matching payment dates"""
+    # Use same date range as payments
+    start_date = datetime(2022, 1, 1)
+    end_date = datetime(2022, 7, 31)
+    
+    return [{
+        'rental_date': fake.date_time_between(start_date=start_date, end_date=end_date),
+        'inventory_id': random.choice(inventory_ids),
+        'customer_id': random.choice(customer_ids),
+        'return_date': fake.date_time_between(start_date=start_date, end_date=end_date) if random.random() > 0.2 else None,
+        'staff_id': random.choice(staff_ids),
+        'last_update': datetime.now()
+    } for _ in range(chunk_size)]
+
+def generate_actor_chunk(chunk_size: int) -> List[dict]:
+    """Generate actor records"""
     current_time = datetime.now()
     
-    countries = [{
-        'country': f"{fake.country()}",
+    return [{
+        'first_name': fake.first_name(),
+        'last_name': fake.last_name(),
         'last_update': current_time
-    } for _ in range(min(num_records // 10, 100))]
+    } for _ in range(chunk_size)]
+
+def generate_film_actor_chunk(chunk_size: int, film_ids: List[int], actor_ids: List[int]) -> List[dict]:
+    """Generate film_actor records with unique combinations"""
+    if not film_ids or not actor_ids:
+        raise ValueError("Both film_ids and actor_ids must not be empty")
+        
+    current_time = datetime.now()
+    combinations = set()
+    records = []
     
-    cities = [{
-        'city': random.choice(cached_values['cities']),
-        'country_id': random.choice(existing_ids['country_ids'] or [1]),
-        'last_update': current_time
-    } for _ in range(min(num_records // 5, 600))]
+    # Limit attempts to avoid infinite loop
+    max_attempts = chunk_size * 2
+    attempts = 0
     
-    addresses = [{
-        'address': f"{random.randint(1, 9999)} {random.choice(cached_values['cities'])} {random.choice(cached_values['street_types'])}",
-        'address2': None if random.random() > 0.3 else f"Apt {random.randint(1, 999)}",
-        'district': random.choice(cached_values['cities']),
-        'city_id': random.choice(existing_ids['city_ids'] or [1]),
-        'postal_code': str(random.randint(10000, 99999)),
-        'phone': random.choice(cached_values['phone_formats']).replace('#', lambda _: str(random.randint(0, 9))),
-        'last_update': current_time
-    } for _ in range(min(num_records // 2, 1000))]
+    while len(records) < chunk_size and attempts < max_attempts:
+        film_id = random.choice(film_ids)
+        actor_id = random.choice(actor_ids)
+        
+        if (film_id, actor_id) not in combinations:
+            combinations.add((film_id, actor_id))
+            records.append({
+                'film_id': film_id,
+                'actor_id': actor_id,
+                'last_update': current_time
+            })
+        attempts += 1
     
-    return countries, cities, addresses
+    return records
 
 def calculate_optimal_chunk_size(total_records: int) -> int:
     """Calculate optimal chunk size based on total records"""
@@ -184,107 +125,66 @@ def calculate_insert_chunk_size(processing_chunk_size: int) -> int:
     """Calculate the INSERT chunk size based on the processing chunk size"""
     return min(5000, max(100, processing_chunk_size // 10))
 
-def bulk_insert_data(num_records: int, host: str, user: str, password: str, database: str):
-    """Main function to handle data insertion with dynamic chunk sizing"""
-    print(f"Connecting to database {database} on {host}...")
-    
-    # Calculate optimal chunk sizes
-    processing_chunk_size = calculate_optimal_chunk_size(num_records)
-    insert_chunk_size = calculate_insert_chunk_size(processing_chunk_size)
-    
-    print(f"Using processing chunk size: {processing_chunk_size:,}")
-    print(f"Using INSERT chunk size: {insert_chunk_size:,}")
-    
-    # Initialize cached values
-    print("Initializing cached values...")
-    cached_values = generate_cached_values()
-    
-    # Adjust pool size based on data volume
-    pool_size = min(20, max(5, num_records // 100_000))
-    max_overflow = pool_size * 2
-    
+def bulk_insert_additional_data(num_records: int, host: str, user: str, password: str, database: str):
+    """Generate additional records for the largest tables"""
     engine = create_engine(
         f'postgresql://{user}:{password}@{host}:5432/{database}',
-        pool_size=pool_size,
-        max_overflow=max_overflow,
+        pool_size=20,
+        max_overflow=40,
         pool_timeout=30
     )
     
-    # Get or create base data
-    existing_ids = create_base_data(engine)
+    # First, let's print current table sizes
+    print("Current table sizes:")
+    for table in get_table_sizes(engine):
+        print(f"{table.table_name}: {table.row_count:,} rows ({table.total_size})")
     
-    # Generate and insert location data if needed
-    if not existing_ids['country_ids'] or not existing_ids['city_ids'] or not existing_ids['address_ids']:
-        countries, cities, addresses = fast_generate_location_chunk(num_records, existing_ids, cached_values)
-        
-        with engine.begin() as conn:
-            if not existing_ids['country_ids']:
-                print("Inserting countries...")
-                pd.DataFrame(countries).to_sql('country', conn, if_exists='append', 
-                                             index=False, method='multi', 
-                                             chunksize=insert_chunk_size)
-            
-            if not existing_ids['city_ids']:
-                print("Inserting cities...")
-                pd.DataFrame(cities).to_sql('city', conn, if_exists='append', 
-                                          index=False, method='multi', 
-                                          chunksize=insert_chunk_size)
-            
-            if not existing_ids['address_ids']:
-                print("Inserting addresses...")
-                pd.DataFrame(addresses).to_sql('address', conn, if_exists='append', 
-                                             index=False, method='multi', 
-                                             chunksize=insert_chunk_size)
-        
-        # Refresh IDs after insertion
-        existing_ids = create_base_data(engine)
-    
-    # Create initial structure (stores and staff)
-    create_initial_structure(engine, existing_ids['address_ids'])
-    
-    # Get store IDs
+    # Get necessary IDs
     with engine.connect() as conn:
+        film_ids = [row[0] for row in conn.execute(text("SELECT film_id FROM film"))]
         store_ids = [row[0] for row in conn.execute(text("SELECT store_id FROM store"))]
+        customer_ids = [row[0] for row in conn.execute(text("SELECT customer_id FROM customer"))]
+        staff_ids = [row[0] for row in conn.execute(text("SELECT staff_id FROM staff"))]
+        actor_ids = [row[0] for row in conn.execute(text("SELECT actor_id FROM actor"))]
     
-    # Generate and insert data in optimized chunks
-    total_chunks = (num_records + processing_chunk_size - 1) // processing_chunk_size
-    
-    print(f"\nInserting {num_records:,} records in {total_chunks:,} chunks")
-    print(f"Estimated total batches: {(num_records // insert_chunk_size):,}")
-    
-    # Generate customers and films in chunks
-    print("\nGenerating and inserting customers...")
-    for offset in tqdm(range(0, num_records, processing_chunk_size)):
-        current_chunk_size = min(processing_chunk_size, num_records - offset)
-        customers = fast_generate_customer_chunk(
-            current_chunk_size,
-            store_ids=store_ids,
-            address_ids=existing_ids['address_ids'],
-            cached_values=cached_values
-        )
+    # Generate actors if none exist
+    if not actor_ids:
+        print("\nGenerating initial actors...")
+        actor_records = generate_actor_chunk(100)  # Create 100 initial actors
         
         with engine.begin() as conn:
-            pd.DataFrame(customers).to_sql(
-                'customer', 
-                conn, 
+            pd.DataFrame(actor_records).to_sql(
+                'actor',
+                conn,
                 if_exists='append',
                 index=False,
                 method='multi',
-                chunksize=insert_chunk_size
+                chunksize=100
             )
+            
+        # Refresh actor IDs
+        with engine.connect() as conn:
+            actor_ids = [row[0] for row in conn.execute(text("SELECT actor_id FROM actor"))]
     
-    print("\nGenerating and inserting films...")
+    # Calculate chunk sizes
+    processing_chunk_size = calculate_optimal_chunk_size(num_records)
+    insert_chunk_size = calculate_insert_chunk_size(processing_chunk_size)
+    
+    print(f"\nGenerating additional records with chunk size: {processing_chunk_size:,}")
+    
+    # Generate inventory first
+    print("\nGenerating inventory records...")
     for offset in tqdm(range(0, num_records, processing_chunk_size)):
         current_chunk_size = min(processing_chunk_size, num_records - offset)
-        films = fast_generate_film_chunk(
+        inventory_records = generate_inventory_chunk(
             current_chunk_size,
-            language_ids=existing_ids['language_ids'],
-            cached_values=cached_values
+            film_ids=film_ids,
+            store_ids=store_ids
         )
         
         with engine.begin() as conn:
-            pd.DataFrame(films).to_sql(
-                'film',
+            pd.DataFrame(inventory_records).to_sql(
+                'inventory',
                 conn,
                 if_exists='append',
                 index=False,
@@ -292,26 +192,103 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
                 chunksize=insert_chunk_size
             )
     
+    # Get inventory IDs for rentals
+    with engine.connect() as conn:
+        inventory_ids = [row[0] for row in conn.execute(text("SELECT inventory_id FROM inventory"))]
+    
+    # Generate rentals
+    print("\nGenerating rental records...")
+    for offset in tqdm(range(0, num_records, processing_chunk_size)):
+        current_chunk_size = min(processing_chunk_size, num_records - offset)
+        rental_records = generate_rental_chunk(
+            current_chunk_size,
+            inventory_ids=inventory_ids,
+            customer_ids=customer_ids,
+            staff_ids=staff_ids
+        )
+        
+        with engine.begin() as conn:
+            pd.DataFrame(rental_records).to_sql(
+                'rental',
+                conn,
+                if_exists='append',
+                index=False,
+                method='multi',
+                chunksize=insert_chunk_size
+            )
+    
+    # Get rental IDs for payments
+    with engine.connect() as conn:
+        rental_ids = [row[0] for row in conn.execute(text("SELECT rental_id FROM rental"))]
+    
+    # Generate payments
+    print("\nGenerating payment records...")
+    for offset in tqdm(range(0, num_records, processing_chunk_size)):
+        current_chunk_size = min(processing_chunk_size, num_records - offset)
+        payment_records = generate_payment_chunk(
+            current_chunk_size,
+            rental_ids=rental_ids,
+            customer_ids=customer_ids,
+            staff_ids=staff_ids
+        )
+        
+        with engine.begin() as conn:
+            pd.DataFrame(payment_records).to_sql(
+                'payment',
+                conn,
+                if_exists='append',
+                index=False,
+                method='multi',
+                chunksize=insert_chunk_size
+            )
+    
+    # Generate film_actor records
+    print("\nGenerating film_actor records...")
+    # Calculate reasonable number of film-actor relationships
+    total_possible_combinations = len(film_ids) * len(actor_ids)
+    film_actor_chunk_size = min(
+        total_possible_combinations // 2,  # Half of possible combinations
+        num_records,                       # Requested number of records
+        100000                            # Maximum limit
+    )
+    
+    try:
+        film_actor_records = generate_film_actor_chunk(
+            film_actor_chunk_size,
+            film_ids=film_ids,
+            actor_ids=actor_ids
+        )
+        
+        with engine.begin() as conn:
+            pd.DataFrame(film_actor_records).to_sql(
+                'film_actor',
+                conn,
+                if_exists='append',
+                index=False,
+                method='multi',
+                chunksize=insert_chunk_size
+            )
+    except ValueError as e:
+        print(f"Warning: Could not generate film_actor records: {str(e)}")
+    
     # Reset sequences
     print("\nResetting sequences...")
     with engine.begin() as conn:
         conn.execute(text("""
-            SELECT setval(pg_get_serial_sequence('language', 'language_id'), (SELECT MAX(language_id) FROM language));
-            SELECT setval(pg_get_serial_sequence('store', 'store_id'), (SELECT MAX(store_id) FROM store));
-            SELECT setval(pg_get_serial_sequence('staff', 'staff_id'), (SELECT MAX(staff_id) FROM staff));
-            SELECT setval(pg_get_serial_sequence('customer', 'customer_id'), (SELECT MAX(customer_id) FROM customer));
-            SELECT setval(pg_get_serial_sequence('film', 'film_id'), (SELECT MAX(film_id) FROM film));
-            SELECT setval(pg_get_serial_sequence('address', 'address_id'), (SELECT MAX(address_id) FROM address));
-            SELECT setval(pg_get_serial_sequence('city', 'city_id'), (SELECT MAX(city_id) FROM city));
-            SELECT setval(pg_get_serial_sequence('country', 'country_id'), (SELECT MAX(country_id) FROM country));
+            SELECT setval(pg_get_serial_sequence('inventory', 'inventory_id'), (SELECT MAX(inventory_id) FROM inventory));
+            SELECT setval(pg_get_serial_sequence('rental', 'rental_id'), (SELECT MAX(rental_id) FROM rental));
+            SELECT setval(pg_get_serial_sequence('payment', 'payment_id'), (SELECT MAX(payment_id) FROM payment));
         """))
     
-    print("\nData generation and insertion complete!")
+    # Print final table sizes
+    print("\nFinal table sizes:")
+    for table in get_table_sizes(engine):
+        print(f"{table.table_name}: {table.row_count:,} rows ({table.total_size})")
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Generate fake data for Pagila database')
+    parser = argparse.ArgumentParser(description='Generate additional records for largest tables in Pagila database')
     parser.add_argument('num_records', type=int, help='Number of records to generate')
     parser.add_argument('--host', default='localhost', help='PostgreSQL host')
     parser.add_argument('--user', default='postgres', help='PostgreSQL username')
@@ -319,4 +296,4 @@ if __name__ == "__main__":
     parser.add_argument('--database', default='pagila', help='PostgreSQL database name')
     args = parser.parse_args()
     
-    bulk_insert_data(args.num_records, args.host, args.user, args.password, args.database)
+    bulk_insert_additional_data(args.num_records, args.host, args.user, args.password, args.database)
