@@ -82,68 +82,105 @@ def create_initial_structure(engine, address_ids: List[int]):
             
             conn.commit()
 
+def generate_long_description() -> str:
+    """Generate a longer, more detailed description"""
+    # Generate multiple paragraphs for a longer description
+    paragraphs = [fake.paragraph(nb_sentences=15) for _ in range(5)]
+    return '\n\n'.join(paragraphs)
+
+def generate_plot_summary() -> str:
+    """Generate a detailed plot summary"""
+    elements = [
+        fake.catch_phrase(),
+        fake.text(max_nb_chars=200),
+        f"Starring {fake.name()} and {fake.name()}",
+        fake.paragraph(nb_sentences=3),
+        f"Directed by {fake.name()}",
+        fake.paragraph(nb_sentences=2)
+    ]
+    return '\n\n'.join(elements)
+
+
+def generate_detailed_address() -> str:
+    """Generate a detailed address with additional information"""
+    parts = [
+        fake.street_address(),
+        f"Building: {fake.building_number()}",
+        f"Block: {fake.random_letter().upper()}-{fake.random_digit()}",
+        f"Zone: {fake.random_int(min=1, max=99)}",
+        f"Additional Info: {fake.sentence()}"
+    ]
+    return ', '.join(parts)
+
+def generate_film_chunk(chunk_size: int, language_ids: List[int]) -> List[dict]:
+    """Generate a chunk of film data with enhanced text content"""
+    ratings = ['G', 'PG', 'PG-13', 'R', 'NC-17']
+    special_features = [
+        ['Trailers', 'Commentaries', 'Deleted Scenes', 'Behind the Scenes'],
+        ['Trailers', 'Commentaries', 'Behind the Scenes'],
+        ['Deleted Scenes', 'Behind the Scenes'],
+        ['Trailers', 'Deleted Scenes']
+    ]
+    
+    return [{
+        'title': f"{fake.catch_phrase()} {random.choice(['Chronicles', 'Story', 'Tales', 'Adventures', 'Legacy'])} - {fake.word().title()}",
+        'description': generate_long_description(),  # Much longer description
+        'release_year': random.randint(1970, 2023),
+        'language_id': random.choice(language_ids),
+        'original_language_id': random.choice(language_ids) if random.random() > 0.7 else None,
+        'rental_duration': random.randint(3, 14),
+        'rental_rate': round(random.uniform(0.99, 9.99), 2),
+        'length': random.randint(60, 240),
+        'replacement_cost': round(random.uniform(9.99, 49.99), 2),
+        'rating': random.choice(ratings),
+        'last_update': datetime.now(),
+        'special_features': random.choice(special_features),
+        'fulltext': None  # This will be automatically updated by trigger
+    } for _ in range(chunk_size)]
+
+
+def generate_customer_chunk(chunk_size: int, store_ids: List[int], address_ids: List[int]) -> List[dict]:
+    """Generate a chunk of customer data with enhanced text fields"""
+    return [{
+        'store_id': random.choice(store_ids),
+        'first_name': ' '.join([fake.first_name() for _ in range(random.randint(1, 3))]),  # Multiple first names
+        'last_name': ' '.join([fake.last_name() for _ in range(random.randint(1, 2))]),    # Multiple last names
+        'email': f"{fake.user_name()}_{fake.random_int()}@{fake.domain_name()}",
+        'address_id': random.choice(address_ids),
+        'activebool': True,
+        'create_date': fake.date_between(start_date='-5y'),
+        'last_update': datetime.now(),
+        'active': 1
+    } for _ in range(chunk_size)]
+
+
+
 def generate_location_chunk(num_records: int, existing_ids: dict) -> tuple:
-    """Generate a chunk of location data"""
+    """Generate location data with enhanced text content"""
     countries = [{
-        'country': fake.country(),
+        'country': f"{fake.country()} {fake.country_code()}",  # Enhanced country name
         'last_update': datetime.now()
     } for _ in range(min(num_records // 10, 100))]
     
     cities = [{
-        'city': fake.city(),
+        'city': f"{fake.city()} {fake.city_suffix()} {random.choice(['North', 'South', 'East', 'West'])}",  # Enhanced city name
         'country_id': random.choice(existing_ids['country_ids'] or [1]),
         'last_update': datetime.now()
     } for _ in range(min(num_records // 5, 600))]
     
     addresses = [{
-        'address': fake.street_address(),
-        'address2': fake.secondary_address() if random.random() > 0.7 else None,
-        'district': fake.city(),
+        'address': generate_detailed_address(),  # Enhanced address
+        'address2': f"Suite {fake.building_number()}, Floor {random.randint(1,50)}, {fake.secondary_address()}" if random.random() > 0.3 else None,
+        'district': f"{fake.city()} District {random.randint(1,99)}",
         'city_id': random.choice(existing_ids['city_ids'] or [1]),
-        'postal_code': fake.zipcode(),
-        'phone': fake.phone_number(),
+        'postal_code': f"{fake.postcode()}-{fake.postcode()}",
+        'phone': f"{fake.phone_number()} / {fake.phone_number()}", # Multiple phone numbers
         'last_update': datetime.now()
     } for _ in range(min(num_records // 2, 1000))]
     
     return countries, cities, addresses
 
-def generate_customer_chunk(chunk_size: int, store_ids: List[int], address_ids: List[int]) -> List[dict]:
-    """Generate a chunk of customer data"""
-    return [{
-        'store_id': random.choice(store_ids),
-        'first_name': fake.first_name(),
-        'last_name': fake.last_name(),
-        'email': fake.email(),
-        'address_id': random.choice(address_ids),
-        'activebool': True,
-        'create_date': fake.date_between(start_date='-1y'),
-        'last_update': datetime.now(),
-        'active': 1
-    } for _ in range(chunk_size)]
 
-def generate_film_chunk(chunk_size: int, language_ids: List[int]) -> List[dict]:
-    """Generate a chunk of film data"""
-    ratings = ['G', 'PG', 'PG-13', 'R', 'NC-17']
-    special_features = [
-        ['Trailers', 'Commentaries'],
-        ['Deleted Scenes'],
-        ['Behind the Scenes'],
-        ['Trailers', 'Deleted Scenes', 'Behind the Scenes']
-    ]
-    
-    return [{
-        'title': fake.catch_phrase(),
-        'description': fake.text(max_nb_chars=200),
-        'release_year': random.randint(1970, 2023),
-        'language_id': random.choice(language_ids),
-        'rental_duration': random.randint(3, 7),
-        'rental_rate': round(random.uniform(0.99, 4.99), 2),
-        'length': random.randint(60, 180),
-        'replacement_cost': round(random.uniform(9.99, 29.99), 2),
-        'rating': random.choice(ratings),
-        'last_update': datetime.now(),
-        'special_features': random.choice(special_features)
-    } for _ in range(chunk_size)]
 
 def parallel_generate_data(func, num_records: int, chunk_size: int, **kwargs) -> List[dict]:
     """Generate data in parallel"""
@@ -159,6 +196,21 @@ def parallel_generate_data(func, num_records: int, chunk_size: int, **kwargs) ->
         ))
     
     return [item for sublist in results for item in sublist]
+
+def generate_staff_data(address_id: int, store_id: int) -> dict:
+    """Generate enhanced staff data"""
+    return {
+        'first_name': ' '.join([fake.first_name() for _ in range(random.randint(1, 2))]),
+        'last_name': ' '.join([fake.last_name() for _ in range(random.randint(1, 2))]),
+        'address_id': address_id,
+        'email': f"{fake.user_name()}_{fake.random_int()}@{fake.domain_name()}",
+        'store_id': store_id,
+        'active': True,
+        'username': fake.user_name(),
+        'password': fake.password(length=random.randint(12, 30)),
+        'last_update': datetime.now(),
+        'picture': None  # Keep as None or implement proper binary data if needed
+    }
 
 def bulk_insert_data(num_records: int, host: str, user: str, password: str, database: str):
     """Main function to handle data insertion"""
