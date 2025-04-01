@@ -1,0 +1,1 @@
+docker run --name sql -e POSTGRES_PASSWORD=your_password -p 5432:5432 -d postgres

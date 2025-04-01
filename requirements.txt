@@ -1,0 +1,12 @@
+## The following requirements were added by pip freeze:
+Faker==37.1.0
+greenlet==3.1.1
+numpy==2.2.4
+pandas==2.2.3
+psycopg2-binary==2.9.10
+python-dateutil==2.9.0.post0
+pytz==2025.2
+six==1.17.0
+SQLAlchemy==2.0.40
+typing_extensions==4.13.0
+tzdata==2025.2
