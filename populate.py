@@ -2,13 +2,32 @@ from faker import Faker
 from sqlalchemy import create_engine, text
 from datetime import datetime
 import random
-from typing import List
+from typing import List, Dict
 import pandas as pd
 from tqdm import tqdm
 import concurrent.futures
 from functools import partial
 
 fake = Faker()
+
+def generate_cached_values() -> Dict:
+    """Pre-generate common values to avoid repeated random generation"""
+    return {
+        'first_names': [fake.first_name() for _ in range(100)],
+        'last_names': [fake.last_name() for _ in range(100)],
+        'email_domains': [fake.domain_name() for _ in range(20)],
+        'street_types': ['Street', 'Avenue', 'Road', 'Boulevard', 'Lane', 'Drive'],
+        'cities': [fake.city() for _ in range(50)],
+        'descriptions': ['\n'.join([fake.paragraph(nb_sentences=10) for _ in range(3)]) for _ in range(50)],
+        'titles': [fake.catch_phrase() for _ in range(100)],
+        'phone_formats': ["(###) ###-####", "###-###-####", "+1 ### ### ####"],
+        'special_features_options': [
+            ['Trailers', 'Commentaries', 'Deleted Scenes', 'Behind the Scenes'],
+            ['Trailers', 'Commentaries'],
+            ['Deleted Scenes', 'Behind the Scenes'],
+            ['Trailers', 'Behind the Scenes']
+        ]
+    }
 
 def create_base_data(engine) -> dict:
     """Create or get all base data needed for the database"""
@@ -82,49 +101,14 @@ def create_initial_structure(engine, address_ids: List[int]):
             
             conn.commit()
 
-def generate_long_description() -> str:
-    """Generate a longer, more detailed description"""
-    # Generate multiple paragraphs for a longer description
-    paragraphs = [fake.paragraph(nb_sentences=15) for _ in range(5)]
-    return '\n\n'.join(paragraphs)
-
-def generate_plot_summary() -> str:
-    """Generate a detailed plot summary"""
-    elements = [
-        fake.catch_phrase(),
-        fake.text(max_nb_chars=200),
-        f"Starring {fake.name()} and {fake.name()}",
-        fake.paragraph(nb_sentences=3),
-        f"Directed by {fake.name()}",
-        fake.paragraph(nb_sentences=2)
-    ]
-    return '\n\n'.join(elements)
-
-
-def generate_detailed_address() -> str:
-    """Generate a detailed address with additional information"""
-    parts = [
-        fake.street_address(),
-        f"Building: {fake.building_number()}",
-        f"Block: {fake.random_letter().upper()}-{fake.random_digit()}",
-        f"Zone: {fake.random_int(min=1, max=99)}",
-        f"Additional Info: {fake.sentence()}"
-    ]
-    return ', '.join(parts)
-
-def generate_film_chunk(chunk_size: int, language_ids: List[int]) -> List[dict]:
-    """Generate a chunk of film data with enhanced text content"""
+def fast_generate_film_chunk(chunk_size: int, language_ids: List[int], cached_values: dict) -> List[dict]:
+    """Generate film data using cached values for better performance"""
     ratings = ['G', 'PG', 'PG-13', 'R', 'NC-17']
-    special_features = [
-        ['Trailers', 'Commentaries', 'Deleted Scenes', 'Behind the Scenes'],
-        ['Trailers', 'Commentaries', 'Behind the Scenes'],
-        ['Deleted Scenes', 'Behind the Scenes'],
-        ['Trailers', 'Deleted Scenes']
-    ]
+    current_time = datetime.now()
     
     return [{
-        'title': f"{fake.catch_phrase()} {random.choice(['Chronicles', 'Story', 'Tales', 'Adventures', 'Legacy'])} - {fake.word().title()}",
-        'description': generate_long_description(),  # Much longer description
+        'title': f"{random.choice(cached_values['titles'])} {random.choice(['Chronicles', 'Story', 'Tales', 'Adventures', 'Legacy'])}",
+        'description': random.choice(cached_values['descriptions']),
         'release_year': random.randint(1970, 2023),
         'language_id': random.choice(language_ids),
         'original_language_id': random.choice(language_ids) if random.random() > 0.7 else None,
@@ -133,88 +117,56 @@ def generate_film_chunk(chunk_size: int, language_ids: List[int]) -> List[dict]:
         'length': random.randint(60, 240),
         'replacement_cost': round(random.uniform(9.99, 49.99), 2),
         'rating': random.choice(ratings),
-        'last_update': datetime.now(),
-        'special_features': random.choice(special_features),
-        'fulltext': None  # This will be automatically updated by trigger
+        'last_update': current_time,
+        'special_features': random.choice(cached_values['special_features_options']),
+        'fulltext': None
     } for _ in range(chunk_size)]
 
-
-def generate_customer_chunk(chunk_size: int, store_ids: List[int], address_ids: List[int]) -> List[dict]:
-    """Generate a chunk of customer data with enhanced text fields"""
+def fast_generate_customer_chunk(chunk_size: int, store_ids: List[int], address_ids: List[int], cached_values: dict) -> List[dict]:
+    """Generate customer data using cached values for better performance"""
+    current_time = datetime.now()
+    
     return [{
         'store_id': random.choice(store_ids),
-        'first_name': ' '.join([fake.first_name() for _ in range(random.randint(1, 3))]),  # Multiple first names
-        'last_name': ' '.join([fake.last_name() for _ in range(random.randint(1, 2))]),    # Multiple last names
-        'email': f"{fake.user_name()}_{fake.random_int()}@{fake.domain_name()}",
+        'first_name': random.choice(cached_values['first_names']),
+        'last_name': random.choice(cached_values['last_names']),
+        'email': f"{random.choice(cached_values['first_names']).lower()}.{random.choice(cached_values['last_names']).lower()}@{random.choice(cached_values['email_domains'])}",
         'address_id': random.choice(address_ids),
         'activebool': True,
-        'create_date': fake.date_between(start_date='-5y'),
-        'last_update': datetime.now(),
+        'create_date': current_time.date(),
+        'last_update': current_time,
         'active': 1
     } for _ in range(chunk_size)]
 
-
-
-def generate_location_chunk(num_records: int, existing_ids: dict) -> tuple:
-    """Generate location data with enhanced text content"""
+def fast_generate_location_chunk(num_records: int, existing_ids: dict, cached_values: dict) -> tuple:
+    """Generate location data using cached values for better performance"""
+    current_time = datetime.now()
+    
     countries = [{
-        'country': f"{fake.country()} {fake.country_code()}",  # Enhanced country name
-        'last_update': datetime.now()
+        'country': f"{fake.country()}",
+        'last_update': current_time
     } for _ in range(min(num_records // 10, 100))]
     
     cities = [{
-        'city': f"{fake.city()} {fake.city_suffix()} {random.choice(['North', 'South', 'East', 'West'])}",  # Enhanced city name
+        'city': random.choice(cached_values['cities']),
         'country_id': random.choice(existing_ids['country_ids'] or [1]),
-        'last_update': datetime.now()
+        'last_update': current_time
     } for _ in range(min(num_records // 5, 600))]
     
     addresses = [{
-        'address': generate_detailed_address(),  # Enhanced address
-        'address2': f"Suite {fake.building_number()}, Floor {random.randint(1,50)}, {fake.secondary_address()}" if random.random() > 0.3 else None,
-        'district': f"{fake.city()} District {random.randint(1,99)}",
+        'address': f"{random.randint(1, 9999)} {random.choice(cached_values['cities'])} {random.choice(cached_values['street_types'])}",
+        'address2': None if random.random() > 0.3 else f"Apt {random.randint(1, 999)}",
+        'district': random.choice(cached_values['cities']),
         'city_id': random.choice(existing_ids['city_ids'] or [1]),
-        'postal_code': f"{fake.postcode()}-{fake.postcode()}",
-        'phone': f"{fake.phone_number()} / {fake.phone_number()}", # Multiple phone numbers
-        'last_update': datetime.now()
+        'postal_code': str(random.randint(10000, 99999)),
+        'phone': random.choice(cached_values['phone_formats']).replace('#', lambda _: str(random.randint(0, 9))),
+        'last_update': current_time
     } for _ in range(min(num_records // 2, 1000))]
     
     return countries, cities, addresses
 
-
-def parallel_generate_data(func, num_records: int, chunk_size: int, **kwargs) -> List[dict]:
-    """Generate data in parallel with proper chunking"""
-    chunks = [
-        (chunk_size if i < num_records - chunk_size else num_records - i) 
-        for i in range(0, num_records, chunk_size)
-    ]
-    
-    results = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        partial_func = partial(func, **kwargs)
-        futures = [executor.submit(partial_func, size) for size in chunks]
-        
-        for future in tqdm(
-            concurrent.futures.as_completed(futures),
-            total=len(chunks),
-            desc=f"Generating {func.__name__.replace('generate_', '')}"
-        ):
-            results.extend(future.result())
-    
-    return results
-
 def calculate_optimal_chunk_size(total_records: int) -> int:
-    """
-    Calculate optimal chunk size based on total records
-    
-    Guidelines:
-    - For small datasets (<10K): chunk_size = 1000
-    - For medium datasets (10K-100K): chunk_size = 5000
-    - For large datasets (100K-1M): chunk_size = 10000
-    - For very large datasets (1M-10M): chunk_size = 50000
-    - For huge datasets (>10M): chunk_size = 100000
-    
-    Also ensures chunk size doesn't exceed 10% of total records
-    """
+    """Calculate optimal chunk size based on total records"""
     if total_records < 10_000:
         chunk_size = 1_000
     elif total_records < 100_000:
@@ -226,17 +178,11 @@ def calculate_optimal_chunk_size(total_records: int) -> int:
     else:
         chunk_size = 100_000
     
-    # Ensure chunk size doesn't exceed 10% of total records
     return min(chunk_size, max(1000, total_records // 10))
 
-
 def calculate_insert_chunk_size(processing_chunk_size: int) -> int:
-    """
-    Calculate the INSERT chunk size based on the processing chunk size
-    Usually 10% of the processing chunk size, with minimum of 100 and maximum of 5000
-    """
+    """Calculate the INSERT chunk size based on the processing chunk size"""
     return min(5000, max(100, processing_chunk_size // 10))
-
 
 def bulk_insert_data(num_records: int, host: str, user: str, password: str, database: str):
     """Main function to handle data insertion with dynamic chunk sizing"""
@@ -248,6 +194,10 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
     
     print(f"Using processing chunk size: {processing_chunk_size:,}")
     print(f"Using INSERT chunk size: {insert_chunk_size:,}")
+    
+    # Initialize cached values
+    print("Initializing cached values...")
+    cached_values = generate_cached_values()
     
     # Adjust pool size based on data volume
     pool_size = min(20, max(5, num_records // 100_000))
@@ -265,38 +215,26 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
     
     # Generate and insert location data if needed
     if not existing_ids['country_ids'] or not existing_ids['city_ids'] or not existing_ids['address_ids']:
-        countries, cities, addresses = generate_location_chunk(num_records, existing_ids)
+        countries, cities, addresses = fast_generate_location_chunk(num_records, existing_ids, cached_values)
         
         with engine.begin() as conn:
             if not existing_ids['country_ids']:
                 print("Inserting countries...")
-                pd.DataFrame(countries).to_sql(
-                    'country', conn, 
-                    if_exists='append', 
-                    index=False, 
-                    method='multi', 
-                    chunksize=insert_chunk_size
-                )
+                pd.DataFrame(countries).to_sql('country', conn, if_exists='append', 
+                                             index=False, method='multi', 
+                                             chunksize=insert_chunk_size)
             
             if not existing_ids['city_ids']:
                 print("Inserting cities...")
-                pd.DataFrame(cities).to_sql(
-                    'city', conn, 
-                    if_exists='append', 
-                    index=False, 
-                    method='multi', 
-                    chunksize=insert_chunk_size
-                )
+                pd.DataFrame(cities).to_sql('city', conn, if_exists='append', 
+                                          index=False, method='multi', 
+                                          chunksize=insert_chunk_size)
             
             if not existing_ids['address_ids']:
                 print("Inserting addresses...")
-                pd.DataFrame(addresses).to_sql(
-                    'address', conn, 
-                    if_exists='append', 
-                    index=False, 
-                    method='multi', 
-                    chunksize=insert_chunk_size
-                )
+                pd.DataFrame(addresses).to_sql('address', conn, if_exists='append', 
+                                             index=False, method='multi', 
+                                             chunksize=insert_chunk_size)
         
         # Refresh IDs after insertion
         existing_ids = create_base_data(engine)
@@ -318,13 +256,13 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
     print("\nGenerating and inserting customers...")
     for offset in tqdm(range(0, num_records, processing_chunk_size)):
         current_chunk_size = min(processing_chunk_size, num_records - offset)
-        customers = generate_customer_chunk(
+        customers = fast_generate_customer_chunk(
             current_chunk_size,
             store_ids=store_ids,
-            address_ids=existing_ids['address_ids']
+            address_ids=existing_ids['address_ids'],
+            cached_values=cached_values
         )
         
-        # Insert chunk with transaction
         with engine.begin() as conn:
             pd.DataFrame(customers).to_sql(
                 'customer', 
@@ -338,12 +276,12 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
     print("\nGenerating and inserting films...")
     for offset in tqdm(range(0, num_records, processing_chunk_size)):
         current_chunk_size = min(processing_chunk_size, num_records - offset)
-        films = generate_film_chunk(
+        films = fast_generate_film_chunk(
             current_chunk_size,
-            language_ids=existing_ids['language_ids']
+            language_ids=existing_ids['language_ids'],
+            cached_values=cached_values
         )
         
-        # Insert chunk with transaction
         with engine.begin() as conn:
             pd.DataFrame(films).to_sql(
                 'film',
@@ -370,7 +308,6 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
     
     print("\nData generation and insertion complete!")
 
-    
 if __name__ == "__main__":
     import argparse
     
