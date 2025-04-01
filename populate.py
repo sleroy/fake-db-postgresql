@@ -10,6 +10,12 @@ from functools import partial
 
 fake = Faker()
 
+def get_existing_film_actor_relationships(engine) -> set:
+    """Get existing film-actor relationships"""
+    with engine.connect() as conn:
+        results = conn.execute(text("SELECT film_id, actor_id FROM film_actor"))
+        return {(row[0], row[1]) for row in results}
+
 def get_table_sizes(engine) -> List[tuple]:
     """Get table sizes ordered by number of records"""
     query = """
@@ -78,33 +84,38 @@ def generate_actor_chunk(chunk_size: int) -> List[dict]:
         'last_update': current_time
     } for _ in range(chunk_size)]
 
-def generate_film_actor_chunk(chunk_size: int, film_ids: List[int], actor_ids: List[int]) -> List[dict]:
+def generate_film_actor_chunk(chunk_size: int, film_ids: List[int], actor_ids: List[int], 
+                            existing_combinations: set) -> List[dict]:
     """Generate film_actor records with unique combinations"""
     if not film_ids or not actor_ids:
         raise ValueError("Both film_ids and actor_ids must not be empty")
         
     current_time = datetime.now()
-    combinations = set()
     records = []
     
     # Limit attempts to avoid infinite loop
-    max_attempts = chunk_size * 2
+    max_attempts = chunk_size * 10
     attempts = 0
     
     while len(records) < chunk_size and attempts < max_attempts:
         film_id = random.choice(film_ids)
         actor_id = random.choice(actor_ids)
         
-        if (film_id, actor_id) not in combinations:
-            combinations.add((film_id, actor_id))
+        if (film_id, actor_id) not in existing_combinations:
+            existing_combinations.add((film_id, actor_id))
             records.append({
                 'film_id': film_id,
                 'actor_id': actor_id,
                 'last_update': current_time
             })
         attempts += 1
+        
+        if attempts == max_attempts:
+            print(f"Warning: Could only generate {len(records)} unique film-actor relationships")
+            break
     
     return records
+
 
 def calculate_optimal_chunk_size(total_records: int) -> int:
     """Calculate optimal chunk size based on total records"""
@@ -242,34 +253,47 @@ def bulk_insert_additional_data(num_records: int, host: str, user: str, password
                 chunksize=insert_chunk_size
             )
     
-    # Generate film_actor records
+ # Generate film_actor records
     print("\nGenerating film_actor records...")
-    # Calculate reasonable number of film-actor relationships
+    existing_combinations = get_existing_film_actor_relationships(engine)
+    print(f"Found {len(existing_combinations):,} existing film-actor relationships")
+    
+    # Calculate reasonable number of new relationships to add
     total_possible_combinations = len(film_ids) * len(actor_ids)
+    remaining_combinations = total_possible_combinations - len(existing_combinations)
     film_actor_chunk_size = min(
-        total_possible_combinations // 2,  # Half of possible combinations
-        num_records,                       # Requested number of records
-        100000                            # Maximum limit
+        remaining_combinations,  # Don't try to add more than possible
+        num_records,            # Don't exceed requested number
+        100000                  # Maximum limit
     )
     
-    try:
-        film_actor_records = generate_film_actor_chunk(
-            film_actor_chunk_size,
-            film_ids=film_ids,
-            actor_ids=actor_ids
-        )
-        
-        with engine.begin() as conn:
-            pd.DataFrame(film_actor_records).to_sql(
-                'film_actor',
-                conn,
-                if_exists='append',
-                index=False,
-                method='multi',
-                chunksize=insert_chunk_size
+    if film_actor_chunk_size <= 0:
+        print("No more unique film-actor combinations possible")
+    else:
+        print(f"Attempting to generate {film_actor_chunk_size:,} new film-actor relationships")
+        try:
+            film_actor_records = generate_film_actor_chunk(
+                film_actor_chunk_size,
+                film_ids=film_ids,
+                actor_ids=actor_ids,
+                existing_combinations=existing_combinations
             )
-    except ValueError as e:
-        print(f"Warning: Could not generate film_actor records: {str(e)}")
+            
+            if film_actor_records:  # Only insert if we have records
+                with engine.begin() as conn:
+                    pd.DataFrame(film_actor_records).to_sql(
+                        'film_actor',
+                        conn,
+                        if_exists='append',
+                        index=False,
+                        method='multi',
+                        chunksize=insert_chunk_size
+                    )
+                print(f"Successfully added {len(film_actor_records):,} new film-actor relationships")
+            else:
+                print("No new film-actor relationships were generated")
+        except ValueError as e:
+            print(f"Warning: Could not generate film_actor records: {str(e)}")
     
     # Reset sequences
     print("\nResetting sequences...")
