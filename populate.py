@@ -190,7 +190,7 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
         store_ids = [row[0] for row in conn.execute(text("SELECT store_id FROM store"))]
     
     # Generate and insert customers and films in parallel
-    chunk_size = 1000
+    chunk_size = 10000
     
     print("Generating and inserting customers...")
     customers = parallel_generate_data(
