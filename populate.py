@@ -181,41 +181,84 @@ def generate_location_chunk(num_records: int, existing_ids: dict) -> tuple:
     return countries, cities, addresses
 
 
-
 def parallel_generate_data(func, num_records: int, chunk_size: int, **kwargs) -> List[dict]:
-    """Generate data in parallel"""
-    chunks = [(chunk_size if i < num_records - chunk_size else num_records - i) 
-             for i in range(0, num_records, chunk_size)]
+    """Generate data in parallel with proper chunking"""
+    chunks = [
+        (chunk_size if i < num_records - chunk_size else num_records - i) 
+        for i in range(0, num_records, chunk_size)
+    ]
     
+    results = []
     with concurrent.futures.ThreadPoolExecutor() as executor:
         partial_func = partial(func, **kwargs)
-        results = list(tqdm(
-            executor.map(partial_func, chunks),
+        futures = [executor.submit(partial_func, size) for size in chunks]
+        
+        for future in tqdm(
+            concurrent.futures.as_completed(futures),
             total=len(chunks),
             desc=f"Generating {func.__name__.replace('generate_', '')}"
-        ))
+        ):
+            results.extend(future.result())
     
-    return [item for sublist in results for item in sublist]
+    return results
 
-def generate_staff_data(address_id: int, store_id: int) -> dict:
-    """Generate enhanced staff data"""
-    return {
-        'first_name': ' '.join([fake.first_name() for _ in range(random.randint(1, 2))]),
-        'last_name': ' '.join([fake.last_name() for _ in range(random.randint(1, 2))]),
-        'address_id': address_id,
-        'email': f"{fake.user_name()}_{fake.random_int()}@{fake.domain_name()}",
-        'store_id': store_id,
-        'active': True,
-        'username': fake.user_name(),
-        'password': fake.password(length=random.randint(12, 30)),
-        'last_update': datetime.now(),
-        'picture': None  # Keep as None or implement proper binary data if needed
-    }
+def calculate_optimal_chunk_size(total_records: int) -> int:
+    """
+    Calculate optimal chunk size based on total records
+    
+    Guidelines:
+    - For small datasets (<10K): chunk_size = 1000
+    - For medium datasets (10K-100K): chunk_size = 5000
+    - For large datasets (100K-1M): chunk_size = 10000
+    - For very large datasets (1M-10M): chunk_size = 50000
+    - For huge datasets (>10M): chunk_size = 100000
+    
+    Also ensures chunk size doesn't exceed 10% of total records
+    """
+    if total_records < 10_000:
+        chunk_size = 1_000
+    elif total_records < 100_000:
+        chunk_size = 5_000
+    elif total_records < 1_000_000:
+        chunk_size = 10_000
+    elif total_records < 10_000_000:
+        chunk_size = 50_000
+    else:
+        chunk_size = 100_000
+    
+    # Ensure chunk size doesn't exceed 10% of total records
+    return min(chunk_size, max(1000, total_records // 10))
+
+
+def calculate_insert_chunk_size(processing_chunk_size: int) -> int:
+    """
+    Calculate the INSERT chunk size based on the processing chunk size
+    Usually 10% of the processing chunk size, with minimum of 100 and maximum of 5000
+    """
+    return min(5000, max(100, processing_chunk_size // 10))
+
 
 def bulk_insert_data(num_records: int, host: str, user: str, password: str, database: str):
-    """Main function to handle data insertion"""
+    """Main function to handle data insertion with dynamic chunk sizing"""
     print(f"Connecting to database {database} on {host}...")
-    engine = create_engine(f'postgresql://{user}:{password}@{host}:5432/{database}')
+    
+    # Calculate optimal chunk sizes
+    processing_chunk_size = calculate_optimal_chunk_size(num_records)
+    insert_chunk_size = calculate_insert_chunk_size(processing_chunk_size)
+    
+    print(f"Using processing chunk size: {processing_chunk_size:,}")
+    print(f"Using INSERT chunk size: {insert_chunk_size:,}")
+    
+    # Adjust pool size based on data volume
+    pool_size = min(20, max(5, num_records // 100_000))
+    max_overflow = pool_size * 2
+    
+    engine = create_engine(
+        f'postgresql://{user}:{password}@{host}:5432/{database}',
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=30
+    )
     
     # Get or create base data
     existing_ids = create_base_data(engine)
@@ -224,14 +267,38 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
     if not existing_ids['country_ids'] or not existing_ids['city_ids'] or not existing_ids['address_ids']:
         countries, cities, addresses = generate_location_chunk(num_records, existing_ids)
         
-        if not existing_ids['country_ids']:
-            pd.DataFrame(countries).to_sql('country', engine, if_exists='append', index=False)
-        if not existing_ids['city_ids']:
-            pd.DataFrame(cities).to_sql('city', engine, if_exists='append', index=False)
-        if not existing_ids['address_ids']:
-            pd.DataFrame(addresses).to_sql('address', engine, if_exists='append', index=False)
+        with engine.begin() as conn:
+            if not existing_ids['country_ids']:
+                print("Inserting countries...")
+                pd.DataFrame(countries).to_sql(
+                    'country', conn, 
+                    if_exists='append', 
+                    index=False, 
+                    method='multi', 
+                    chunksize=insert_chunk_size
+                )
+            
+            if not existing_ids['city_ids']:
+                print("Inserting cities...")
+                pd.DataFrame(cities).to_sql(
+                    'city', conn, 
+                    if_exists='append', 
+                    index=False, 
+                    method='multi', 
+                    chunksize=insert_chunk_size
+                )
+            
+            if not existing_ids['address_ids']:
+                print("Inserting addresses...")
+                pd.DataFrame(addresses).to_sql(
+                    'address', conn, 
+                    if_exists='append', 
+                    index=False, 
+                    method='multi', 
+                    chunksize=insert_chunk_size
+                )
         
-        # Refresh IDs
+        # Refresh IDs after insertion
         existing_ids = create_base_data(engine)
     
     # Create initial structure (stores and staff)
@@ -241,30 +308,55 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
     with engine.connect() as conn:
         store_ids = [row[0] for row in conn.execute(text("SELECT store_id FROM store"))]
     
-    # Generate and insert customers and films in parallel
-    chunk_size = 10000
+    # Generate and insert data in optimized chunks
+    total_chunks = (num_records + processing_chunk_size - 1) // processing_chunk_size
     
-    print("Generating and inserting customers...")
-    customers = parallel_generate_data(
-        generate_customer_chunk, 
-        num_records, 
-        chunk_size,
-        store_ids=store_ids,
-        address_ids=existing_ids['address_ids']
-    )
-    pd.DataFrame(customers).to_sql('customer', engine, if_exists='append', index=False, method='multi', chunksize=chunk_size)
+    print(f"\nInserting {num_records:,} records in {total_chunks:,} chunks")
+    print(f"Estimated total batches: {(num_records // insert_chunk_size):,}")
     
-    print("Generating and inserting films...")
-    films = parallel_generate_data(
-        generate_film_chunk,
-        num_records,
-        chunk_size,
-        language_ids=existing_ids['language_ids']
-    )
-    pd.DataFrame(films).to_sql('film', engine, if_exists='append', index=False, method='multi', chunksize=chunk_size)
+    # Generate customers and films in chunks
+    print("\nGenerating and inserting customers...")
+    for offset in tqdm(range(0, num_records, processing_chunk_size)):
+        current_chunk_size = min(processing_chunk_size, num_records - offset)
+        customers = generate_customer_chunk(
+            current_chunk_size,
+            store_ids=store_ids,
+            address_ids=existing_ids['address_ids']
+        )
+        
+        # Insert chunk with transaction
+        with engine.begin() as conn:
+            pd.DataFrame(customers).to_sql(
+                'customer', 
+                conn, 
+                if_exists='append',
+                index=False,
+                method='multi',
+                chunksize=insert_chunk_size
+            )
+    
+    print("\nGenerating and inserting films...")
+    for offset in tqdm(range(0, num_records, processing_chunk_size)):
+        current_chunk_size = min(processing_chunk_size, num_records - offset)
+        films = generate_film_chunk(
+            current_chunk_size,
+            language_ids=existing_ids['language_ids']
+        )
+        
+        # Insert chunk with transaction
+        with engine.begin() as conn:
+            pd.DataFrame(films).to_sql(
+                'film',
+                conn,
+                if_exists='append',
+                index=False,
+                method='multi',
+                chunksize=insert_chunk_size
+            )
     
     # Reset sequences
-    with engine.connect() as conn:
+    print("\nResetting sequences...")
+    with engine.begin() as conn:
         conn.execute(text("""
             SELECT setval(pg_get_serial_sequence('language', 'language_id'), (SELECT MAX(language_id) FROM language));
             SELECT setval(pg_get_serial_sequence('store', 'store_id'), (SELECT MAX(store_id) FROM store));
@@ -275,10 +367,10 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
             SELECT setval(pg_get_serial_sequence('city', 'city_id'), (SELECT MAX(city_id) FROM city));
             SELECT setval(pg_get_serial_sequence('country', 'country_id'), (SELECT MAX(country_id) FROM country));
         """))
-        conn.commit()
     
-    print("Data generation and insertion complete!")
+    print("\nData generation and insertion complete!")
 
+    
 if __name__ == "__main__":
     import argparse
     
