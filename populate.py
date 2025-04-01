@@ -218,6 +218,123 @@ def create_films(num_records: int, language_ids: List[int]) -> List[dict]:
         })
     return films
 
+def get_or_create_staff_and_stores(engine, address_ids: List[int]) -> tuple[List[int], List[int]]:
+    """Get existing staff and store IDs or create minimum required entries"""
+    with engine.connect() as conn:
+        print("Checking staff and stores...")
+        # Check existing stores
+        result = conn.execute(text("SELECT store_id FROM store"))
+        store_ids = [row[0] for row in result]
+        
+        # Check existing staff
+        result = conn.execute(text("SELECT staff_id, store_id FROM staff"))
+        staff_data = [(row[0], row[1]) for row in result]
+        staff_ids = [row[0] for row in staff_data] if staff_data else []
+
+        if not store_ids or not staff_ids or len(staff_ids) < 2:
+            print("Creating initial store and staff structure...")
+            
+            # Start a transaction
+            trans = conn.begin()
+            try:
+                # 1. Create first store with temporary staff ID
+                if 1 not in store_ids:
+                    print("Creating first store...")
+                    conn.execute(text("""
+                        INSERT INTO store (store_id, manager_staff_id, address_id, last_update)
+                        VALUES (1, 1, :address_id, NOW())
+                    """), {
+                        "address_id": address_ids[0]
+                    })
+
+                # 2. Create first staff member
+                if not staff_ids:
+                    print("Creating first staff member...")
+                    conn.execute(text("""
+                        INSERT INTO staff (
+                            first_name, last_name, address_id, email,
+                            active, username, password, store_id, last_update
+                        ) VALUES (
+                            :first_name, :last_name, :address_id, :email,
+                            TRUE, :username, :password, 1, NOW()
+                        )
+                    """), {
+                        "first_name": fake.first_name(),
+                        "last_name": fake.last_name(),
+                        "address_id": random.choice(address_ids),
+                        "email": fake.email(),
+                        "username": fake.user_name(),
+                        "password": fake.password()
+                    })
+                    
+                    # Get the ID of the first staff member
+                    result = conn.execute(text("SELECT staff_id FROM staff ORDER BY staff_id DESC LIMIT 1"))
+                    first_staff_id = result.scalar()
+
+                    # Update first store with correct manager_staff_id
+                    conn.execute(text("""
+                        UPDATE store 
+                        SET manager_staff_id = :staff_id
+                        WHERE store_id = 1
+                    """), {"staff_id": first_staff_id})
+
+                # 3. Create second store
+                if 2 not in store_ids:
+                    print("Creating second store...")
+                    conn.execute(text("""
+                        INSERT INTO store (store_id, manager_staff_id, address_id, last_update)
+                        VALUES (2, 1, :address_id, NOW())
+                    """), {
+                        "address_id": address_ids[1]
+                    })
+
+                # 4. Create second staff member if needed
+                if len(staff_ids) < 2:
+                    print("Creating second staff member...")
+                    conn.execute(text("""
+                        INSERT INTO staff (
+                            first_name, last_name, address_id, email,
+                            active, username, password, store_id, last_update
+                        ) VALUES (
+                            :first_name, :last_name, :address_id, :email,
+                            TRUE, :username, :password, 2, NOW()
+                        )
+                    """), {
+                        "first_name": fake.first_name(),
+                        "last_name": fake.last_name(),
+                        "address_id": random.choice(address_ids),
+                        "email": fake.email(),
+                        "username": fake.user_name(),
+                        "password": fake.password()
+                    })
+                    
+                    # Get the ID of the second staff member
+                    result = conn.execute(text("SELECT staff_id FROM staff ORDER BY staff_id DESC LIMIT 1"))
+                    second_staff_id = result.scalar()
+
+                    # Update second store with correct manager_staff_id
+                    conn.execute(text("""
+                        UPDATE store 
+                        SET manager_staff_id = :staff_id
+                        WHERE store_id = 2
+                    """), {"staff_id": second_staff_id})
+
+                trans.commit()
+
+                # Get final IDs
+                result = conn.execute(text("SELECT staff_id FROM staff"))
+                staff_ids = [row[0] for row in result]
+                
+                result = conn.execute(text("SELECT store_id FROM store"))
+                store_ids = [row[0] for row in result]
+
+            except Exception as e:
+                trans.rollback()
+                print(f"Error creating staff and stores: {e}")
+                raise
+
+    return staff_ids, store_ids
+
 def bulk_insert_data(num_records: int, host: str, user: str, password: str, database: str):
     """Main function to handle data insertion"""
     print(f"Connecting to database {database} on {host}...")
@@ -229,8 +346,9 @@ def bulk_insert_data(num_records: int, host: str, user: str, password: str, data
     country_ids = get_or_create_countries(engine, num_records)
     city_ids = get_or_create_cities(engine, num_records, country_ids)
     address_ids = get_or_create_addresses(engine, num_records, city_ids)
-    staff_ids = get_or_create_staff(engine, address_ids)
-    store_ids = get_or_create_stores(engine, staff_ids, address_ids)
+    
+    # Get or create staff and stores together to handle their interdependency
+    staff_ids, store_ids = get_or_create_staff_and_stores(engine, address_ids)
     
     # Create and insert new customers
     print("Creating customers...")
