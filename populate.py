@@ -15,57 +15,6 @@ import math
 # Create a Faker instance per process
 fake = Faker()
 
-def get_table_sizes(engine) -> List[tuple]:
-    """Get detailed table sizes including data size, index size, and row count"""
-    query = """
-    SELECT 
-        schemaname,
-        relname as table_name,
-        n_live_tup as row_count,
-        pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as total_size,
-        pg_size_pretty(pg_relation_size(schemaname||'.'||relname)) as data_size,
-        pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname) - pg_relation_size(schemaname||'.'||relname)) as index_size,
-        pg_relation_size(schemaname||'.'||relname) as raw_data_size,
-        pg_total_relation_size(schemaname||'.'||relname) as raw_total_size
-    FROM pg_stat_user_tables
-    WHERE schemaname = 'public'
-    ORDER BY pg_total_relation_size(schemaname||'.'||relname) DESC;
-    """
-    
-    with engine.connect() as conn:
-        results = conn.execute(text(query))
-        return results.fetchall()
-
-def print_table_sizes(sizes, title=""):
-    """Print table sizes in a formatted way"""
-    print(f"\n{title}")
-    print("-" * 100)
-    print(f"{'Table Name':<30} {'Row Count':>12} {'Data Size':>15} {'Index Size':>15} {'Total Size':>15}")
-    print("-" * 100)
-    
-    total_rows = 0
-    total_data_size = 0
-    total_index_size = 0
-    total_size = 0
-    
-    for row in sizes:
-        print(f"{row.table_name:<30} {row.row_count:>12,} {row.data_size:>15} {row.index_size:>15} {row.total_size:>15}")
-        total_rows += row.row_count
-        total_data_size += row.raw_data_size
-        total_index_size += (row.raw_total_size - row.raw_data_size)
-        total_size += row.raw_total_size
-    
-    print("-" * 100)
-    print(f"{'TOTAL':<30} {total_rows:>12,} {sizeof_fmt(total_data_size):>15} {sizeof_fmt(total_index_size):>15} {sizeof_fmt(total_size):>15}")
-
-def sizeof_fmt(num: int) -> str:
-    """Convert bytes to human readable format"""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
-        if abs(num) < 1024.0:
-            return f"{num:3.1f} {unit}"
-        num /= 1024.0
-    return f"{num:.1f} EB"
-
 def init_faker():
     """Initialize Faker for each process"""
     global fake
@@ -93,42 +42,39 @@ def parallel_chunk_generator(func, total_size: int, chunk_size: int, num_process
 def parallel_insert_chunks(engine, table_name: str, chunks: List[dict], insert_chunk_size: int, 
                          num_threads: int):
     """Insert chunks in parallel using multiple threads"""
-    # Convert list of dictionaries to DataFrame
     df = pd.DataFrame(chunks)
     total_rows = len(df)
     splits = np.array_split(df, math.ceil(total_rows / insert_chunk_size))
     
-    def insert_chunk(chunk):
-        """Helper function to insert a chunk of data"""
-        with engine.begin() as conn:
-            chunk.to_sql(
-                table_name,
-                conn,
-                if_exists='append',
-                index=False,
-                method='multi',
-                chunksize=insert_chunk_size
-            )
-    
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        list(tqdm(
-            executor.map(insert_chunk, splits),
-            total=len(splits),
-            desc=f"Inserting {table_name}"
-        ))
-
+        futures = []
+        for chunk in splits:
+            futures.append(
+                executor.submit(
+                    lambda c: c.to_sql(
+                        table_name,
+                        engine,
+                        if_exists='append',
+                        index=False,
+                        method='multi',
+                        chunksize=insert_chunk_size
+                    ),
+                    chunk
+                )
+            )
+        
+        for future in tqdm(futures, total=len(futures), desc=f"Inserting {table_name}"):
+            future.result()
 
 def generate_inventory_chunk(chunk_size: int, film_ids: List[int], store_ids: List[int]) -> List[dict]:
     """Generate inventory records in parallel"""
     current_time = datetime.now()
     
-    # Create a list of dictionaries with proper column names
     return [{
         'film_id': random.choice(film_ids),
         'store_id': random.choice(store_ids),
         'last_update': current_time
     } for _ in range(chunk_size)]
-
 
 def generate_rental_chunk(chunk_size: int, inventory_ids: List[int], 
                          customer_ids: List[int], staff_ids: List[int]) -> List[dict]:
@@ -168,7 +114,7 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
     if num_processes is None:
         num_processes = mp.cpu_count()
     if num_threads is None:
-        num_threads = min(32, num_processes * 2)
+        num_threads = min(32, num_processes * 2)  # Reasonable thread pool size
         
     print(f"Using {num_processes} processes for data generation")
     print(f"Using {num_threads} threads for database insertion")
@@ -181,15 +127,11 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
         pool_timeout=30
     )
     
-    # Get initial table sizes
-    initial_sizes = get_table_sizes(engine)
-    print_table_sizes(initial_sizes, "Initial Table Sizes")
-    
     # Calculate chunk sizes
     generation_chunk_size = max(1000, num_records // (num_processes * 4))
     insert_chunk_size = max(100, generation_chunk_size // 10)
     
-    print(f"\nGeneration chunk size: {generation_chunk_size:,}")
+    print(f"Generation chunk size: {generation_chunk_size:,}")
     print(f"Insert chunk size: {insert_chunk_size:,}")
     
     # Get necessary IDs
@@ -198,7 +140,7 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
         store_ids = [row[0] for row in conn.execute(text("SELECT store_id FROM store"))]
         customer_ids = [row[0] for row in conn.execute(text("SELECT customer_id FROM customer"))]
         staff_ids = [row[0] for row in conn.execute(text("SELECT staff_id FROM staff"))]
-    
+        
     # Generate and insert inventory
     print("\nGenerating inventory records...")
     inventory_chunks = parallel_chunk_generator(
@@ -210,12 +152,8 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
         store_ids=store_ids
     )
     
-    # Convert chunks to DataFrame before insertion
-    inventory_df = pd.DataFrame(inventory_chunks)
     print("Inserting inventory records...")
-
     parallel_insert_chunks(engine, 'inventory', inventory_chunks, insert_chunk_size, num_threads)
-    
     
     # Get inventory IDs for rentals
     with engine.connect() as conn:
@@ -263,28 +201,6 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
             SELECT setval(pg_get_serial_sequence('rental', 'rental_id'), (SELECT MAX(rental_id) FROM rental));
             SELECT setval(pg_get_serial_sequence('payment', 'payment_id'), (SELECT MAX(payment_id) FROM payment));
         """))
-    
- # Get final table sizes
-    final_sizes = get_table_sizes(engine)
-    print_table_sizes(final_sizes, "Final Table Sizes")
-    
-    # Print size differences
-    print("\nSize Changes:")
-    print("-" * 100)
-    print(f"{'Table Name':<30} {'Row Difference':>15} {'Size Difference':>20}")
-    print("-" * 100)
-    
-    initial_sizes_dict = {row.table_name: row for row in initial_sizes}
-    final_sizes_dict = {row.table_name: row for row in final_sizes}
-    
-    for table_name in final_sizes_dict:
-        if table_name in initial_sizes_dict:
-            initial = initial_sizes_dict[table_name]
-            final = final_sizes_dict[table_name]
-            row_diff = final.row_count - initial.row_count
-            size_diff = final.raw_total_size - initial.raw_total_size
-            if row_diff > 0 or size_diff > 0:
-                print(f"{table_name:<30} {row_diff:>15,} {sizeof_fmt(size_diff):>20}")
     
     print("\nAll operations completed successfully!")
 
