@@ -93,39 +93,42 @@ def parallel_chunk_generator(func, total_size: int, chunk_size: int, num_process
 def parallel_insert_chunks(engine, table_name: str, chunks: List[dict], insert_chunk_size: int, 
                          num_threads: int):
     """Insert chunks in parallel using multiple threads"""
+    # Convert list of dictionaries to DataFrame
     df = pd.DataFrame(chunks)
     total_rows = len(df)
     splits = np.array_split(df, math.ceil(total_rows / insert_chunk_size))
     
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = []
-        for chunk in splits:
-            futures.append(
-                executor.submit(
-                    lambda c: c.to_sql(
-                        table_name,
-                        engine,
-                        if_exists='append',
-                        index=False,
-                        method='multi',
-                        chunksize=insert_chunk_size
-                    ),
-                    chunk
-                )
+    def insert_chunk(chunk):
+        """Helper function to insert a chunk of data"""
+        with engine.begin() as conn:
+            chunk.to_sql(
+                table_name,
+                conn,
+                if_exists='append',
+                index=False,
+                method='multi',
+                chunksize=insert_chunk_size
             )
-        
-        for future in tqdm(futures, total=len(futures), desc=f"Inserting {table_name}"):
-            future.result()
+    
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        list(tqdm(
+            executor.map(insert_chunk, splits),
+            total=len(splits),
+            desc=f"Inserting {table_name}"
+        ))
+
 
 def generate_inventory_chunk(chunk_size: int, film_ids: List[int], store_ids: List[int]) -> List[dict]:
     """Generate inventory records in parallel"""
     current_time = datetime.now()
     
+    # Create a list of dictionaries with proper column names
     return [{
         'film_id': random.choice(film_ids),
         'store_id': random.choice(store_ids),
         'last_update': current_time
     } for _ in range(chunk_size)]
+
 
 def generate_rental_chunk(chunk_size: int, inventory_ids: List[int], 
                          customer_ids: List[int], staff_ids: List[int]) -> List[dict]:
@@ -165,7 +168,7 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
     if num_processes is None:
         num_processes = mp.cpu_count()
     if num_threads is None:
-        num_threads = min(32, num_processes * 2)  # Reasonable thread pool size
+        num_threads = min(32, num_processes * 2)
         
     print(f"Using {num_processes} processes for data generation")
     print(f"Using {num_threads} threads for database insertion")
@@ -186,7 +189,7 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
     generation_chunk_size = max(1000, num_records // (num_processes * 4))
     insert_chunk_size = max(100, generation_chunk_size // 10)
     
-    print(f"Generation chunk size: {generation_chunk_size:,}")
+    print(f"\nGeneration chunk size: {generation_chunk_size:,}")
     print(f"Insert chunk size: {insert_chunk_size:,}")
     
     # Get necessary IDs
@@ -195,7 +198,7 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
         store_ids = [row[0] for row in conn.execute(text("SELECT store_id FROM store"))]
         customer_ids = [row[0] for row in conn.execute(text("SELECT customer_id FROM customer"))]
         staff_ids = [row[0] for row in conn.execute(text("SELECT staff_id FROM staff"))]
-        
+    
     # Generate and insert inventory
     print("\nGenerating inventory records...")
     inventory_chunks = parallel_chunk_generator(
@@ -207,8 +210,12 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
         store_ids=store_ids
     )
     
+    # Convert chunks to DataFrame before insertion
+    inventory_df = pd.DataFrame(inventory_chunks)
     print("Inserting inventory records...")
+
     parallel_insert_chunks(engine, 'inventory', inventory_chunks, insert_chunk_size, num_threads)
+    
     
     # Get inventory IDs for rentals
     with engine.connect() as conn:
