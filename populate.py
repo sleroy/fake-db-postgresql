@@ -265,7 +265,7 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
     print("\nGenerating inventory records...")
     inventory_chunks = parallel_chunk_generator(
         generate_inventory_chunk,
-        num_records,
+        num_records * 10,
         generation_chunk_size,
         num_processes,
         film_ids=film_ids,
@@ -286,6 +286,7 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
         inventory_ids = [row[0] for row in conn.execute(text("SELECT inventory_id FROM inventory"))]
     
     # Generate and insert rentals
+    disable_indexes(engine, 'rental')
     print("\nGenerating rental records...")
     rental_chunks = parallel_chunk_generator(
         generate_rental_chunk,
@@ -299,11 +300,13 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
     
     print("Inserting rental records...")
     parallel_insert_chunks(engine, 'rental', rental_chunks, insert_chunk_size, num_threads)
+    enable_indexes(engine, 'rental')
     
     # Get rental IDs for payments
     with engine.connect() as conn:
         rental_ids = [row[0] for row in conn.execute(text("SELECT rental_id FROM rental"))]
     
+    disable_indexes(engine, 'payment')
     # Generate and insert payments
     print("\nGenerating payment records...")
     payment_chunks = parallel_chunk_generator(
@@ -318,6 +321,7 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
     
     print("Inserting payment records...")
     parallel_insert_chunks(engine, 'payment', payment_chunks, insert_chunk_size, num_threads)
+    enable_indexes(engine, 'payment')
     
     # Reset sequences
     print("\nResetting sequences...")
@@ -355,8 +359,6 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
     print("\nAll operations completed successfully!")
     
     
-    print("\nAll operations completed successfully!")
-
 if __name__ == "__main__":
     import argparse
     
