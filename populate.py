@@ -23,6 +23,57 @@ def init_faker():
     Faker.seed(os.getpid())
     random.seed(os.getpid())
 
+def get_table_sizes(engine) -> List[tuple]:
+    """Get detailed table sizes including data size, index size, and row count"""
+    query = """
+    SELECT 
+        schemaname,
+        relname as table_name,
+        n_live_tup as row_count,
+        pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as total_size,
+        pg_size_pretty(pg_relation_size(schemaname||'.'||relname)) as data_size,
+        pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname) - pg_relation_size(schemaname||'.'||relname)) as index_size,
+        pg_relation_size(schemaname||'.'||relname) as raw_data_size,
+        pg_total_relation_size(schemaname||'.'||relname) as raw_total_size
+    FROM pg_stat_user_tables
+    WHERE schemaname = 'public'
+    ORDER BY pg_total_relation_size(schemaname||'.'||relname) DESC;
+    """
+    
+    with engine.connect() as conn:
+        results = conn.execute(text(query))
+        return results.fetchall()
+
+def print_table_sizes(sizes, title=""):
+    """Print table sizes in a formatted way"""
+    print(f"\n{title}")
+    print("-" * 100)
+    print(f"{'Table Name':<30} {'Row Count':>12} {'Data Size':>15} {'Index Size':>15} {'Total Size':>15}")
+    print("-" * 100)
+    
+    total_rows = 0
+    total_data_size = 0
+    total_index_size = 0
+    total_size = 0
+    
+    for row in sizes:
+        print(f"{row.table_name:<30} {row.row_count:>12,} {row.data_size:>15} {row.index_size:>15} {row.total_size:>15}")
+        total_rows += row.row_count
+        total_data_size += row.raw_data_size
+        total_index_size += (row.raw_total_size - row.raw_data_size)
+        total_size += row.raw_total_size
+    
+    print("-" * 100)
+    print(f"{'TOTAL':<30} {total_rows:>12,} {sizeof_fmt(total_data_size):>15} {sizeof_fmt(total_index_size):>15} {sizeof_fmt(total_size):>15}")
+
+def sizeof_fmt(num: int) -> str:
+    """Convert bytes to human readable format"""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+        if abs(num) < 1024.0:
+            return f"{num:3.1f} {unit}"
+        num /= 1024.0
+    return f"{num:.1f} EB"
+
 def parallel_chunk_generator(func, total_size: int, chunk_size: int, num_processes: int, **kwargs) -> List[dict]:
     """Generate chunks in parallel using multiple processes"""
     chunks = []
@@ -127,6 +178,12 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
         pool_timeout=30
     )
     
+
+    # Get initial table sizes
+    initial_sizes = get_table_sizes(engine)
+    print_table_sizes(initial_sizes, "Initial Table Sizes")
+    
+    
     # Calculate chunk sizes
     generation_chunk_size = max(1000, num_records // (num_processes * 4))
     insert_chunk_size = max(100, generation_chunk_size // 10)
@@ -201,6 +258,33 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
             SELECT setval(pg_get_serial_sequence('rental', 'rental_id'), (SELECT MAX(rental_id) FROM rental));
             SELECT setval(pg_get_serial_sequence('payment', 'payment_id'), (SELECT MAX(payment_id) FROM payment));
         """))
+    
+    # Print size differences
+    print("\nSize Changes:")
+    print("-" * 100)
+    print(f"{'Table Name':<30} {'Row Difference':>15} {'Size Difference':>20}")
+    print("-" * 100)
+    
+    
+    # Get final table sizes
+    final_sizes = get_table_sizes(engine)
+    print_table_sizes(final_sizes, "Final Table Sizes")
+        
+    
+    initial_sizes_dict = {row.table_name: row for row in initial_sizes}
+    final_sizes_dict = {row.table_name: row for row in final_sizes}
+    
+    for table_name in final_sizes_dict:
+        if table_name in initial_sizes_dict:
+            initial = initial_sizes_dict[table_name]
+            final = final_sizes_dict[table_name]
+            row_diff = final.row_count - initial.row_count
+            size_diff = final.raw_total_size - initial.raw_total_size
+            if row_diff > 0 or size_diff > 0:
+                print(f"{table_name:<30} {row_diff:>15,} {sizeof_fmt(size_diff):>20}")
+    
+    print("\nAll operations completed successfully!")
+    
     
     print("\nAll operations completed successfully!")
 
