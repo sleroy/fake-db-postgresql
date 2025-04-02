@@ -11,17 +11,28 @@ from datetime import datetime
 import random
 from tqdm import tqdm
 import math
+from datetime import datetime, timedelta
 
 # Create a Faker instance per process
 fake = Faker()
 
 def init_faker():
-    """Initialize Faker for each process"""
+    """Initialize Faker and numpy random seed for each process"""
     global fake
     fake = Faker()
     # Set seed based on process ID for better randomization
-    Faker.seed(os.getpid())
-    random.seed(os.getpid())
+    process_seed = os.getpid()
+    Faker.seed(process_seed)
+    np.random.seed(process_seed)
+
+def disable_indexes(engine, table_name):
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {table_name} DISABLE TRIGGER ALL;"))
+
+def enable_indexes(engine, table_name):
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {table_name} ENABLE TRIGGER ALL;"))
+
 
 def get_table_sizes(engine) -> List[tuple]:
     """Get detailed table sizes including data size, index size, and row count"""
@@ -118,43 +129,94 @@ def parallel_insert_chunks(engine, table_name: str, chunks: List[dict], insert_c
             future.result()
 
 def generate_inventory_chunk(chunk_size: int, film_ids: List[int], store_ids: List[int]) -> List[dict]:
-    """Generate inventory records in parallel"""
+    """Generate inventory records in parallel using numpy for better performance"""
     current_time = datetime.now()
     
+    # Use numpy for faster random selection
+    film_ids_arr = np.random.choice(film_ids, size=chunk_size)
+    store_ids_arr = np.random.choice(store_ids, size=chunk_size)
+    
+    # Create arrays all at once
     return [{
-        'film_id': random.choice(film_ids),
-        'store_id': random.choice(store_ids),
+        'film_id': film_id,
+        'store_id': store_id,
         'last_update': current_time
-    } for _ in range(chunk_size)]
+    } for film_id, store_id in zip(film_ids_arr, store_ids_arr)]
+
 
 def generate_rental_chunk(chunk_size: int, inventory_ids: List[int], 
                          customer_ids: List[int], staff_ids: List[int]) -> List[dict]:
-    """Generate rental records in parallel"""
+    """Generate rental records using vectorized operations"""
     start_date = datetime(2022, 1, 1)
     end_date = datetime(2022, 7, 31)
+    delta = end_date - start_date
+    days = delta.days
     
+    # Generate all random values at once
+    inventory_ids_arr = np.random.choice(inventory_ids, size=chunk_size)
+    customer_ids_arr = np.random.choice(customer_ids, size=chunk_size)
+    staff_ids_arr = np.random.choice(staff_ids, size=chunk_size)
+    
+    # Generate random dates efficiently
+    random_days = np.random.randint(0, days, size=chunk_size)
+    rental_dates = [start_date + timedelta(days=int(x)) for x in random_days]
+    
+    # Generate return dates (80% probability of return)
+    return_mask = np.random.random(chunk_size) > 0.2
+    return_days = np.random.randint(0, 30, size=chunk_size)  # Return within 30 days
+    return_dates = [rd + timedelta(days=int(ret_days)) if mask else None 
+                   for rd, ret_days, mask in zip(rental_dates, return_days, return_mask)]
+    
+    current_time = datetime.now()
+    
+    # Create records all at once
     return [{
-        'rental_date': fake.date_time_between(start_date=start_date, end_date=end_date),
-        'inventory_id': random.choice(inventory_ids),
-        'customer_id': random.choice(customer_ids),
-        'return_date': fake.date_time_between(start_date=start_date, end_date=end_date) if random.random() > 0.2 else None,
-        'staff_id': random.choice(staff_ids),
-        'last_update': datetime.now()
-    } for _ in range(chunk_size)]
+        'rental_date': rd,
+        'inventory_id': inv_id,
+        'customer_id': cust_id,
+        'return_date': ret_date,
+        'staff_id': staff_id,
+        'last_update': current_time
+    } for rd, inv_id, cust_id, ret_date, staff_id in zip(
+        rental_dates, inventory_ids_arr, customer_ids_arr, return_dates, staff_ids_arr
+    )]
+
 
 def generate_payment_chunk(chunk_size: int, rental_ids: List[int], 
                          customer_ids: List[int], staff_ids: List[int]) -> List[dict]:
-    """Generate payment records in parallel"""
+    """Generate payment records using vectorized operations"""
     start_date = datetime(2022, 1, 1)
     end_date = datetime(2022, 7, 31)
+    delta = end_date - start_date
+    days = delta.days
     
+    # Generate all random values at once
+    rental_ids_arr = np.random.choice(rental_ids, size=chunk_size)
+    customer_ids_arr = np.random.choice(customer_ids, size=chunk_size)
+    staff_ids_arr = np.random.choice(staff_ids, size=chunk_size)
+    
+    # Generate amounts efficiently
+    amounts = np.round(np.random.uniform(0.99, 9.99, size=chunk_size), 2)
+    
+    # Generate payment dates efficiently
+    random_days = np.random.randint(0, days, size=chunk_size)
+    payment_dates = [start_date + timedelta(days=int(x)) for x in random_days]
+    
+    # Create records all at once
     return [{
-        'customer_id': random.choice(customer_ids),
-        'staff_id': random.choice(staff_ids),
-        'rental_id': random.choice(rental_ids),
-        'amount': round(random.uniform(0.99, 9.99), 2),
-        'payment_date': fake.date_time_between(start_date=start_date, end_date=end_date)
-    } for _ in range(chunk_size)]
+        'customer_id': cust_id,
+        'staff_id': staff_id,
+        'rental_id': rent_id,
+        'amount': amount,
+        'payment_date': pay_date
+    } for cust_id, staff_id, rent_id, amount, pay_date in zip(
+        customer_ids_arr, staff_ids_arr, rental_ids_arr, amounts, payment_dates
+    )]
+
+def optimize_for_bulk_loading(engine):
+    with engine.begin() as conn:
+        conn.execute(text("SET maintenance_work_mem = '1GB';"))
+        conn.execute(text("SET synchronous_commit = OFF;"))
 
 def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str, 
                                        password: str, database: str, num_processes: int = None,
@@ -177,7 +239,8 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
         max_overflow=num_threads * 2,
         pool_timeout=30
     )
-    
+    # Use at the start of the process   
+    optimize_for_bulk_loading(engine)
 
     # Get initial table sizes
     initial_sizes = get_table_sizes(engine)
@@ -209,8 +272,14 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
         store_ids=store_ids
     )
     
+    # Use in the main function:
+    disable_indexes(engine, 'inventory')
+    # Do insertions
+
     print("Inserting inventory records...")
     parallel_insert_chunks(engine, 'inventory', inventory_chunks, insert_chunk_size, num_threads)
+
+    enable_indexes(engine, 'inventory')
     
     # Get inventory IDs for rentals
     with engine.connect() as conn:
