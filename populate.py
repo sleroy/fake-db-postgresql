@@ -290,7 +290,7 @@ def parallel_bulk_insert_additional_data(num_records: int, host: str, user: str,
     print("\nGenerating rental records...")
     rental_chunks = parallel_chunk_generator(
         generate_rental_chunk,
-        num_records * 10,
+        num_records,
         generation_chunk_size,
         num_processes,
         inventory_ids=inventory_ids,
